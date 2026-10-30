@@ -1,0 +1,11 @@
+scanner.device=/dev/ttyACM0
+reader.host=127.0.0.1
+reader.port=5084
+reader.timeout.ms=5000
+reconnect.ms=3000
+gpi.debounce.ms=150
+barcode.validity.seconds=60
+status.bind=0.0.0.0
+status.port=8081
+operation.timeout.ms=30000
+recovery.marker=rfid-operation.marker
