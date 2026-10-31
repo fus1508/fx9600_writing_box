@@ -6,8 +6,9 @@ import java.util.Properties;
 
 /** Configuration contains no credentials; RFID password is supplied via environment. */
 public final class StationConfig {
-    public final String device, host, statusHost, recoveryMarker, journalPath;
+    public final String device, host, statusHost, recoveryMarker, journalPath, stateDirectory;
     public final int port, timeoutMs, reconnectMs, debounceMs, validitySeconds, statusPort, operationTimeoutMs;
+    public final int restartLimit, restartBaseMs, restartCapMs, stopTimeoutMs, progressTimeoutMs;
     public final long password;
     public StationConfig(String file) throws IOException {
         Properties p = new Properties();
@@ -18,10 +19,19 @@ public final class StationConfig {
         statusPort = number(p, "status.port", 8081, 1, 65535);
         recoveryMarker = text(p, "recovery.marker", "rfid-operation.marker");
         journalPath = text(p, "transaction.journal", "rfid-transactions.journal");
+        // Required for station/supervisor modes; offline Phase 1 ACK remains compatible.
+        stateDirectory = p.getProperty("station.state.directory", "").trim();
         operationTimeoutMs = number(p, "operation.timeout.ms", 30000, 10000, 300000);
+        restartLimit = number(p, "supervisor.restart.limit", 3, 0, 100);
+        restartBaseMs = number(p, "supervisor.restart.base.ms", 1000, 100, 60000);
+        restartCapMs = number(p, "supervisor.restart.cap.ms", 30000, restartBaseMs, 300000);
+        stopTimeoutMs = number(p, "supervisor.stop.timeout.ms", 15000, 1000, 300000);
         port = number(p, "reader.port", 5084, 1, 65535);
         timeoutMs = number(p, "reader.timeout.ms", 5000, 100, 60000);
         reconnectMs = number(p, "reconnect.ms", 3000, 1000, 60000);
+        int minimumProgressMs = Math.max(operationTimeoutMs, Math.max(reconnectMs, timeoutMs)) + 1000;
+        progressTimeoutMs = number(p, "process.progress.timeout.ms", Math.max(90000, minimumProgressMs),
+                minimumProgressMs, 600000);
         debounceMs = number(p, "gpi.debounce.ms", 150, 1, 5000);
         validitySeconds = number(p, "barcode.validity.seconds", 60, 1, 3600);
         String secret = System.getenv("FX9600_ACCESS_PASSWORD");

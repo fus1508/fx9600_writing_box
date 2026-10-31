@@ -11,3 +11,11 @@ operation.timeout.ms=30000
 recovery.marker=rfid-operation.marker
 # Persistent protected state. Preserve across upgrades/restarts; never place under /tmp.
 transaction.journal=rfid-transactions.journal
+# Phase 2: provision a private persistent directory outside release folders; replace paths before use.
+# journal and marker must be absolute paths in this directory. Existing Phase 1 evidence must be preserved.
+station.state.directory=/apps/writing-box-state
+supervisor.restart.limit=3
+supervisor.restart.base.ms=1000
+supervisor.restart.cap.ms=30000
+supervisor.stop.timeout.ms=15000
+process.progress.timeout.ms=90000

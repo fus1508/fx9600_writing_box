@@ -1,0 +1,2 @@
+deploy/*.sh text eol=lf
+deploy/fx9600-writing-box text eol=lf
