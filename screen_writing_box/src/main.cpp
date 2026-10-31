@@ -6,6 +6,11 @@
 #include "config.h"
 #include "be_vietnam_pro_20.h"
 #include "be_vietnam_pro_32.h"
+#include "health_ui.h"
+#include "status_parser.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 
 #if TFT_RST == TFT_CS && TFT_RST >= 0
 #error "TFT_CS and TFT_RST share a GPIO; confirm and correct the display wiring"
@@ -14,18 +19,11 @@
 namespace {
 TFT_eSPI display;
 TFT_eSprite lineSprite(&display);
-unsigned long lastPoll = 0;
 unsigned long lastWifiAttempt = 0;
-unsigned long lastSuccess = 0;
-bool hasSuccess = false;
-bool offlineShown = false;
-bool offlineWifiConnected = false;
-String offlineReason;
-int lastWifiStatus = -1;
-String revision;
-constexpr unsigned long retryMs = 500;
-constexpr unsigned long offlineMs = 5000;
 constexpr unsigned long wifiRetryMs = 10000;
+healthui::Controller controller;
+struct NetworkSample { healthui::Snapshot snapshot; uint32_t startedAt, completedAt; };
+QueueHandle_t samples;
 
 struct DisplayLine {
     String text;
@@ -45,7 +43,7 @@ void useFont(bool large) {
 
 void updateBadge(unsigned int index, int x, const char* label, uint16_t color, bool wifi = false) {
     DisplayLine& line = lines[index];
-    if (line.drawn && line.color == color) return;
+    if (line.drawn && line.color == color && line.text == label) return;
     if (spriteReady) {
         useFont(false);
         lineSprite.fillSprite(TFT_BLACK);
@@ -73,6 +71,7 @@ void updateBadge(unsigned int index, int x, const char* label, uint16_t color, b
         display.print(label);
     }
     line.color = color;
+    line.text = label;
     line.drawn = true;
 }
 
@@ -102,51 +101,65 @@ void updateLine(unsigned int index, int y, int height, const String& text,
 }
 
 uint16_t deviceColor(const char* status) {
-    if (strcmp(status, "READY") == 0 || strcmp(status, "CONNECTED") == 0) return TFT_GREEN;
-    if (strcmp(status, "UNKNOWN") == 0) return TFT_YELLOW;
+    if (strcmp(status, "READY") == 0) return TFT_GREEN;
+    if (strcmp(status, "CONNECTED") == 0 || strcmp(status, "UNKNOWN") == 0 || strcmp(status, "RECOVERING") == 0) return TFT_YELLOW;
     return TFT_RED;
 }
 
-const char* stateMessage(const char* state) {
-    if (strcmp(state, "WAIT_TRIGGER") == 0) return "Chờ nhấn nút";
-    if (strcmp(state, "WRITING") == 0) return "Đang ghi";
-    if (strcmp(state, "PASS") == 0) return "Thành công";
-    if (strcmp(state, "FAIL") == 0) return "Thất bại";
-    if (strcmp(state, "IDLE") == 0) return "Sẵn sàng";
-    return state;
+// This task never touches TFT or the UI controller. One fixed-size latest-snapshot mailbox.
+void networkTask(void*) {
+    String revision;
+    for (;;) {
+        if (WiFi.status() != WL_CONNECTED) { revision = ""; vTaskDelay(pdMS_TO_TICKS(100)); continue; }
+        HTTPClient http;
+        http.setConnectTimeout(700); http.setTimeout(900); http.setReuse(false);
+        String url = STATION_STATUS_URL;
+        bool ok = false;
+        NetworkSample message = {};
+        message.startedAt = millis();
+        if (url.endsWith("/status") && http.begin(url + "/wait?since=" + revision)) {
+            if (http.GET() == HTTP_CODE_OK && http.getSize() > 0 && http.getSize() <= 8192) {
+                String payload = http.getString();
+                StaticJsonDocument<6144> doc;
+                if (payload.length() <= 8192 && !deserializeJson(doc, payload) && healthui::parseSnapshot(doc, message.snapshot)) {
+                    message.completedAt = millis();
+                    revision = message.snapshot.revision;
+                    xQueueOverwrite(samples, &message); ok = true;
+                }
+            }
+            http.end();
+        }
+        if (!ok) revision = "";
+        vTaskDelay(pdMS_TO_TICKS(ok ? 5 : 200));
+    }
 }
 
-void showOffline(const char* reason) {
-    offlineWifiConnected = WiFi.status() == WL_CONNECTED;
-    updateBadge(0, 0, "WiFi", offlineWifiConnected ? TFT_GREEN : TFT_RED, true);
-    updateBadge(1, 160, "Reader", TFT_YELLOW);
-    updateBadge(2, 320, "Scanner", TFT_YELLOW);
-    updateLine(3, 65, 32, "");
-    updateLine(4, 108, 55, "Đang chờ mã", TFT_WHITE, true);
-    updateLine(5, 180, 32, "");
-    updateLine(6, 220, 32, "");
-    updateLine(7, 265, 32, "");
-    offlineShown = true;
-    offlineReason = reason;
-}
-
-void showStatus(const JsonDocument& data) {
-    const char* state = data["state"] | "UNKNOWN";
-    const char* scanner = data["scanner"] | "UNKNOWN";
-    const char* reader = data["reader"] | "UNKNOWN";
-    const char* barcode = data["barcode"] | "";
-    const char* epc = data["epc"] | "-";
-    const char* error = data["error"] | "";
-    updateBadge(0, 0, "WiFi", TFT_GREEN, true);
-    updateBadge(1, 160, "Reader", deviceColor(reader));
-    updateBadge(2, 320, "Scanner", deviceColor(scanner));
-    updateLine(3, 65, 32, "");
-    updateLine(4, 108, 55, *barcode ? barcode : "Đang chờ mã", TFT_WHITE, true);
-    updateLine(5, 180, 32, stateMessage(state), strcmp(state, "PASS") == 0 ? TFT_GREEN :
-               strcmp(state, "FAIL") == 0 ? TFT_RED : TFT_CYAN);
-    updateLine(6, 220, 32, error);
-    updateLine(7, 265, 32, *barcode && *epc ? String("EPC: ") + epc : "", TFT_LIGHTGREY);
-    offlineShown = false;
+void showCurrent(bool wifi, uint32_t now) {
+    using namespace healthui;
+    View view = controller.view(wifi, now);
+    const Snapshot& s = controller.current();
+    bool live = controller.reachable(wifi, now);
+    Health r = live ? controller.effective(s.reader, s.readerAge, now) : Health::UNKNOWN;
+    Health c = live ? controller.effective(s.scanner, s.scannerAge, now) : Health::UNKNOWN;
+    updateBadge(0, 0, "WiFi", wifi ? TFT_GREEN : TFT_RED, true);
+    updateBadge(1, 160, "Reader", deviceColor(healthName(r)));
+    updateBadge(2, 320, "Scanner", deviceColor(healthName(c)));
+    updateLine(3, 52, 44, String("R: ") + healthName(r) + " / S: " + healthName(c), TFT_LIGHTGREY);
+    uint16_t color = view == View::PASS || view == View::READY ? TFT_GREEN :
+        view == View::RECOVERY_REQUIRED || view == View::FAIL || view == View::STATION_UNREACHABLE ||
+        view == View::READER_OFFLINE || view == View::SCANNER_OFFLINE ? TFT_RED : TFT_YELLOW;
+    updateLine(4, 105, 55, viewName(view), color, true);
+    String detail;
+    if (view == View::RECOVERY_REQUIRED) detail = "Cần kiểm tra tag / kết quả chưa rõ";
+    else if (!live) detail = wifi ? "Không nhận được trạng thái trạm" : "Mất kết nối Wi-Fi";
+    else if (view == View::UNKNOWN) detail = "Trạng thái cũ / thiếu bằng chứng";
+    else if (view == View::CONNECTED) detail = "Đã kết nối, chưa đủ điều kiện READY";
+    else if (view == View::READY) detail = "Chờ nhấn nút";
+    else detail = s.error[0] ? s.error : s.safetyReason;
+    updateLine(5, 172, 44, detail);
+    updateLine(6, 222, 38, live ? s.barcode : "", TFT_WHITE);
+    updateLine(7, 267, 44, live ? String("App: ") + healthName(controller.effective(s.application, s.applicationAge, now)) +
+        (s.transactionId[0] ? String(" / ") + String(s.transactionId).substring(0, 8) : "") : "App: UNKNOWN", TFT_LIGHTGREY);
 }
 }
 
@@ -163,68 +176,29 @@ void setup() {
         lineSprite.setTextWrap(false);
         lineSprite.loadFont(beVietnamPro20);
     }
-    showOffline("Connecting");
+    samples = xQueueCreate(1, sizeof(NetworkSample));
+    showCurrent(true, 0);
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     lastWifiAttempt = millis();
+    if (samples != nullptr) xTaskCreate(networkTask, "station-http", 16384, nullptr, 1, nullptr);
 }
 
 void loop() {
     unsigned long now = millis();
     wl_status_t wifiStatus = WiFi.status();
-    if (static_cast<int>(wifiStatus) != lastWifiStatus) {
-        lastWifiStatus = static_cast<int>(wifiStatus);
-        Serial.printf("[DEBUG-wifi] status=%d\n", lastWifiStatus);
-        if (wifiStatus == WL_CONNECTED) Serial.printf("[DEBUG-wifi] ip=%s\n", WiFi.localIP().toString().c_str());
-    }
     if (wifiStatus != WL_CONNECTED) {
-        if (!offlineShown || offlineWifiConnected || offlineReason != "WiFi disconnected") showOffline("WiFi disconnected");
-        hasSuccess = false;
-        revision = "";
         if (now - lastWifiAttempt >= wifiRetryMs) {
             lastWifiAttempt = now;
             WiFi.disconnect();
             WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
         }
-        delay(50);
-        return;
     }
-    if (offlineShown && !offlineWifiConnected) showOffline("Waiting for reader");
-    if (now - lastPoll >= retryMs) {
-        HTTPClient http;
-        http.setConnectTimeout(1000);
-        http.setTimeout(3500);
-        String endpoint = STATION_STATUS_URL;
-        bool validUrl = endpoint.endsWith("/status");
-        if (validUrl) endpoint += "/wait?since=" + revision;
-        bool success = false;
-        if (validUrl && http.begin(endpoint)) {
-            int code = http.GET();
-            if (code == HTTP_CODE_OK && http.getSize() >= 0 && http.getSize() <= 1024) {
-                String payload = http.getString();
-                StaticJsonDocument<1024> doc;
-                if (!deserializeJson(doc, payload) && doc["revision"].is<const char*>() && doc["state"].is<const char*>() &&
-                    doc["reader"].is<const char*>() && doc["scanner"].is<const char*>()) {
-                    const char* receivedRevision = doc["revision"];
-                    String nextRevision(receivedRevision);
-                    if (nextRevision.length() > 0 && nextRevision.length() <= 64) {
-                        if (offlineShown || nextRevision != revision) showStatus(doc);
-                        revision = nextRevision;
-                        lastSuccess = millis();
-                        hasSuccess = true;
-                        success = true;
-                    }
-                }
-            }
-            http.end();
-        }
-        // Successful long-polls re-open immediately; failures retry with a delay.
-        lastPoll = success ? millis() - retryMs : millis();
+    NetworkSample message;
+    if (samples != nullptr && xQueueReceive(samples, &message, 0) == pdTRUE) {
+        // Include mailbox delay in the age; a suspended render task cannot replay READY.
+        controller.accept(message.snapshot, message.startedAt, millis());
     }
-    now = millis();
-    if ((!hasSuccess || now - lastSuccess >= offlineMs) && !offlineShown) {
-        revision = "";
-        showOffline("No station status");
-    }
-    delay(5);
+    showCurrent(wifiStatus == WL_CONNECTED, millis());
+    delay(20);
 }

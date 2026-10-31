@@ -1,4 +1,4 @@
-param([string]$OutputDirectory = 'target/release-staging', [string]$Version = '2.0.0-local',
+param([string]$OutputDirectory = 'target/release-staging', [string]$Version = '3.0.0-local',
     [string]$TarCommand = 'tar', [string]$ShellCommand = 'sh')
 $ErrorActionPreference = 'Stop'
 Push-Location (Split-Path -Parent $PSScriptRoot)
@@ -42,7 +42,7 @@ try {
     }
     $baseline = (& git rev-parse HEAD | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'Cannot identify source baseline' }
-    $metadata = "version=$Version`nsource.baseline=$baseline`nsource.state=uncommitted-phase2`njournal.schema=FXJNL01`nruntime.schema=FXRUNTIME02`nrollback.requires=FXJNL01+FXRUNTIME02`nproduction.write=BLOCKED`nfirmware.sat=BLOCKED`npackage.type=local-tar-not-zebra-installer`n"
+    $metadata = "version=$Version`nsource.baseline=$baseline`nsource.state=uncommitted-phase3`nstatus.schema=2`njournal.schema=FXJNL01`nruntime.schema=FXRUNTIME02`nrollback.requires=FXJNL01+FXRUNTIME02`nproduction.write=BLOCKED`nfirmware.sat=BLOCKED`npackage.type=local-tar-not-zebra-installer`n"
     [IO.File]::WriteAllText((Join-Path $payload 'release.properties'), $metadata, $utf8)
     $hashes = @(Get-ChildItem -LiteralPath $payload -File | Sort-Object Name | ForEach-Object {
         (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant() + '  ' + $_.Name

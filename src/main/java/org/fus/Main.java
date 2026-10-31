@@ -25,6 +25,7 @@ import java.io.InputStream;
 import org.fus.runtime.RuntimeState;
 import org.fus.runtime.ProcessSupervisor;
 import org.fus.runtime.ProgressWatchdog;
+import org.fus.health.DeviceHealth;
 
 /** One physical tag must be isolated in the enclosure. */
 public final class Main {
@@ -114,7 +115,8 @@ public final class Main {
         final Object connectionLock = new Object();
         final AtomicReference<RfidGateway> gateway = new AtomicReference<RfidGateway>();
         final AtomicBoolean running = new AtomicBoolean(true);
-        final StatusServer status = new StatusServer(config.statusHost, config.statusPort);
+        final DeviceHealth health = new DeviceHealth();
+        final StatusServer status = new StatusServer(config.statusHost, config.statusPort, health);
         final OperationGuard guard = new OperationGuard();
         StationWorkflow.Gateway delegated = new StationWorkflow.Gateway() {
             private RfidGateway current() { RfidGateway g = gateway.get(); if (g == null) throw new IllegalStateException("READER_DISCONNECTED"); return g; }
@@ -127,8 +129,11 @@ public final class Main {
                 System::nanoTime, TimeUnit.SECONDS.toNanos(config.validitySeconds), journal);
         status.start();
         final ScannerSource scanner = new ScannerSource(config.device, config.reconnectMs, new ScannerSource.Listener() {
+            public void health(boolean present, boolean open, String identity, String reason) {
+                health.scannerObservation(present, open, identity, reason);
+            }
             public void state(boolean ready) { synchronized (connectionLock) { scannerReady.set(ready); station.connections(ready, readerReady.get()); } }
-            public void scan(String value) { station.scan(value); }
+            public void scan(String value) { health.scannerDecode(); station.scan(value); }
         });
         final ExecutorService worker = Executors.newSingleThreadExecutor();
         Thread scannerThread = new Thread(scanner::run, "scanner-cdc"); scannerThread.setDaemon(true); scannerThread.start();
@@ -141,7 +146,7 @@ public final class Main {
         }, "scanner-monitor");
         scannerMonitor.setDaemon(true); scannerMonitor.start();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            running.set(false); station.shutdown(); worker.shutdownNow(); guard.close(); status.close(); scanner.close();
+            health.stopped(); running.set(false); station.shutdown(); worker.shutdownNow(); guard.close(); status.close(); scanner.close();
             // The process retains the journal lock until exit, including a blocked native worker.
         }, "station-shutdown"));
         System.out.println("CONNECTION scanner=DISCONNECTED reader=DISCONNECTED");
@@ -153,11 +158,12 @@ public final class Main {
             RuntimeState.create(fence, "SDK_SESSION_UNCONFIRMED\n");
             RFIDReader reader = null;
             try {
+                health.readerConnecting();
                 reader = new RFIDReader(config.host, config.port, config.timeoutMs);
                 reader.connect();
                 if (!reader.Config.GPI.isPortEnabled(1)) throw new IllegalStateException("GPI1_DISABLED");
-                gateway.set(new RfidGateway(reader, config.password));
-                synchronized (connectionLock) { readerReady.set(true); station.connections(scannerReady.get(), true); }
+                health.readerConnected();
+                gateway.set(new RfidGateway(reader, config.password, health::readerFault));
                 GpiButton button = new GpiButton(TimeUnit.MILLISECONDS.toNanos(config.debounceMs));
                 while (running.get()) {
                     if (!Files.notExists(root.resolve("stop.request"))) break;
@@ -168,6 +174,9 @@ public final class Main {
                     station.tick();
                     GPI_PORT_STATE value = reader.Config.GPI.getPortState(1);
                     if (value != GPI_PORT_STATE.GPI_PORT_STATE_HIGH && value != GPI_PORT_STATE.GPI_PORT_STATE_LOW) throw new IllegalStateException("GPI_STATE_UNKNOWN");
+                    if (!gateway.get().isSessionUsable()) break;
+                    health.readerProgress();
+                    synchronized (connectionLock) { readerReady.set(true); station.connections(scannerReady.get(), true); }
                     if (button.update(value == GPI_PORT_STATE.GPI_PORT_STATE_HIGH, System.nanoTime()) && (operation == null || operation.isDone())) {
                         Runnable work = station.beginTrigger();
                         if (work != null) {
@@ -188,10 +197,15 @@ public final class Main {
                             }
                         }
                     }
+                    health.applicationProgress();
                     Thread.sleep(25);
                 }
-            } catch (Exception e) { if (running.get()) System.err.println("READER_ERROR type=" + e.getClass().getSimpleName()); }
+            } catch (Exception e) {
+                health.readerFault("SDK_OPERATION_FAILED");
+                if (running.get()) System.err.println("READER_ERROR type=" + e.getClass().getSimpleName());
+            }
             finally {
+                health.readerFault("SDK_SESSION_UNAVAILABLE");
                 synchronized (connectionLock) { readerReady.set(false); station.connections(scannerReady.get(), false); }
                 // Do not replace the session while an access operation is still running.
                 if (operation != null && !operation.isDone()) {
@@ -209,7 +223,7 @@ public final class Main {
             }
             if (running.get() && Files.notExists(root.resolve("stop.request"))) Thread.sleep(config.reconnectMs);
         }
-        running.set(false); station.shutdown(); worker.shutdownNow(); guard.close(); status.close(); scanner.close();
+        health.stopped(); running.set(false); station.shutdown(); worker.shutdownNow(); guard.close(); status.close(); scanner.close();
         progress.close();
         // Do not close owner/journal here: a daemon shutdown hook may still be using station state.
     }

@@ -10,7 +10,7 @@ try {
     $tests = @(Get-ChildItem -Path 'src/test/java' -Filter '*.java' -Recurse | ForEach-Object { $_.FullName })
     & javac -encoding UTF-8 @compatibility -cp 'target/classes;library/Symbol.RFID.API3.jar' -d 'target/test-classes' $tests
     if ($LASTEXITCODE -ne 0) { throw 'Test compilation failed' }
-    foreach ($check in @('BarcodeFramerCheck', 'WorkflowCheck', 'StatusServerCheck', 'OperationGuardCheck', 'Phase1SafetyCheck', 'TransactionJournalCheck', 'IdentityCheck', 'ProcessSupervisorCheck', 'StartupCheck', 'StopControlCheck')) {
+    foreach ($check in @('BarcodeFramerCheck', 'WorkflowCheck', 'StatusServerCheck', 'OperationGuardCheck', 'Phase1SafetyCheck', 'TransactionJournalCheck', 'IdentityCheck', 'ProcessSupervisorCheck', 'StartupCheck', 'StopControlCheck', 'DeviceHealthCheck', 'HealthApiCheck', 'ScannerHealthCheck')) {
         & java -cp 'target/classes;target/test-classes;library/Symbol.RFID.API3.jar' "org.fus.$check"
         if ($LASTEXITCODE -ne 0) { throw "$check failed" }
     }

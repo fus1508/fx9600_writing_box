@@ -1,5 +1,10 @@
 # Yêu cầu trạng thái và ghi tag
 
+> Phase 3 thay contract health và UI: xem [health-contract](phase3/health-contract.md)
+> và [ui-state-design](phase3/ui-state-design.md). Bảng trạng thái bên dưới mô tả
+> baseline cũ: mở CDC hiện chỉ CONNECTED, không READY. Production RFID vẫn BLOCKED
+> theo Phase 1; không áp dụng quy trình ghi cũ trước nghiệm thu phần cứng.
+
 ## Phạm vi và điều kiện tag
 
 Trạm nhận barcode USB CDC kết thúc LF, nhấn GPI1 để ghi, và chỉ báo PASS sau khi đọc lại EPC khớp và giải mã được barcode. Cách mã hóa hiện tại chỉ nhận hai ký tự ASCII chữ hoa/số theo sau bởi đúng 16 chữ số; xem `epc-encoding.md`. Thay đổi độ dài hoặc loại dữ liệu barcode cần thống nhất hợp đồng giải mã với ứng dụng khác trước khi triển khai.
