@@ -3,7 +3,7 @@ param([Parameter(Mandatory=$true)][string]$Directory,
 $ErrorActionPreference = 'Stop'
 $source = (Resolve-Path -LiteralPath $Directory).Path
 $utf8 = New-Object System.Text.UTF8Encoding($false)
-foreach ($fault in @('checksum','crlf','missing','extra','bytecode','mode','path','case')) {
+foreach ($fault in @('checksum','crlf','missing','extra','bytecode','mode','path','case','provenance','installer-claim','metadata-key','metadata-duplicate')) {
     $root = Join-Path (Split-Path -Parent $PSScriptRoot) ('target/release-fault-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $root | Out-Null
     Copy-Item -Path (Join-Path $source '*') -Destination $root
@@ -12,6 +12,15 @@ foreach ($fault in @('checksum','crlf','missing','extra','bytecode','mode','path
     if ($fault -eq 'crlf') { [IO.File]::WriteAllText($script, ([IO.File]::ReadAllText($script) -replace "`n","`r`n"), $utf8) }
     if ($fault -eq 'missing') { Move-Item -LiteralPath $script -Destination (Join-Path $root 'renamed.sh') }
     if ($fault -eq 'extra') { [IO.File]::WriteAllText((Join-Path $root 'unexpected'), 'extra', $utf8) }
+    if ($fault -in @('provenance','installer-claim','metadata-key','metadata-duplicate')) {
+        $metadataPath = Join-Path $root 'release.properties'
+        $metadata = [IO.File]::ReadAllText($metadataPath)
+        if ($fault -eq 'provenance') { $metadata = $metadata -replace '(?m)^source.inputs.sha256=.*\n?', '' }
+        elseif ($fault -eq 'installer-claim') { $metadata = $metadata -replace 'local-tar-not-zebra-installer', 'zebra-compatible-installer' }
+        elseif ($fault -eq 'metadata-key') { $metadata = $metadata.Replace('source.inputs.sha256=', 'sourceXinputsYsha256=') }
+        else { $metadata += "package.type=zebra-compatible-installer`n" }
+        [IO.File]::WriteAllText($metadataPath, $metadata, $utf8)
+    }
     if ($fault -eq 'case') {
         Move-Item -LiteralPath $script -Destination (Join-Path $root 'rename-intermediate')
         Move-Item -LiteralPath (Join-Path $root 'rename-intermediate') -Destination (Join-Path $root 'RUN.SH')
@@ -28,7 +37,7 @@ foreach ($fault in @('checksum','crlf','missing','extra','bytecode','mode','path
             try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
         } finally { $jar.Dispose() }
     }
-    if ($fault -in @('crlf','bytecode','case')) {
+    if ($fault -in @('crlf','bytecode','case','provenance','installer-claim','metadata-key','metadata-duplicate')) {
         $hashes = @(Get-ChildItem -LiteralPath $root -File | Where-Object Name -ne 'SHA256SUMS' | Sort-Object Name | ForEach-Object {
             (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant() + '  ' + $_.Name
         })
@@ -61,4 +70,4 @@ foreach ($fault in @('checksum','crlf','missing','extra','bytecode','mode','path
     if (-not $rejected) { throw "Release fault accepted: $fault" }
     Write-Host "Rejected release fault: $fault"
 }
-Write-Host 'Release fault injection PASS (8 cases)'
+Write-Host 'Release fault injection PASS (12 cases)'

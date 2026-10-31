@@ -1,0 +1,1 @@
+run_id,device,model,sku,serial,firmware,java_or_runtime,artifact_sha256,native_sdk_sha256,host_mode_or_antenna,clock_reference,operator,evidence_ref,status

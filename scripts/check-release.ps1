@@ -26,10 +26,21 @@ foreach ($name in @('run.sh', 'fx9600-writing-box', 'start_fx9600-writing-box.sh
     & $ShellCommand -n ($path -replace '\\','/')
     if ($LASTEXITCODE -ne 0) { throw "Shell syntax failed: $name" }
 }
-$metadata = Get-Content -Raw -LiteralPath (Join-Path $root 'release.properties')
-if ($metadata -cnotmatch '(?m)^journal.schema=FXJNL01$' -or $metadata -cnotmatch '(?m)^production.write=BLOCKED$' -or
-    $metadata -cnotmatch '(?m)^firmware.sat=BLOCKED$' -or $metadata -cnotmatch '(?m)^runtime.schema=FXRUNTIME02$' -or
-    $metadata -cnotmatch '(?m)^rollback.requires=FXJNL01\+FXRUNTIME02$') { throw 'Safety metadata missing' }
+$metadata = New-Object System.Collections.Hashtable ([StringComparer]::Ordinal)
+foreach ($line in (Get-Content -LiteralPath (Join-Path $root 'release.properties'))) {
+    if ($line -cnotmatch '^([a-z][a-z0-9.]*)=(.+)$') { throw 'Invalid metadata line' }
+    $key = $Matches[1]; $value = $Matches[2]
+    if ($metadata.ContainsKey($key)) { throw "Duplicate metadata key: $key" }
+    $metadata[$key] = $value
+}
+$expected = @{'package.type'='local-tar-not-zebra-installer'; 'status.schema'='2';
+    'journal.schema'='FXJNL01'; 'runtime.schema'='FXRUNTIME02'; 'rollback.requires'='FXJNL01+FXRUNTIME02';
+    'production.write'='BLOCKED'; 'firmware.sat'='BLOCKED'}
+foreach ($key in $expected.Keys) {
+    if (-not $metadata.ContainsKey($key) -or $metadata[$key] -cne $expected[$key]) { throw "Candidate/safety metadata invalid: $key" }
+}
+if (-not $metadata.ContainsKey('source.inputs.sha256') -or
+    $metadata['source.inputs.sha256'] -cnotmatch '^[a-f0-9]{64}$') { throw 'Candidate provenance missing' }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 Add-Type -AssemblyName System.IO.Compression
 $jar = [IO.Compression.ZipFile]::OpenRead((Join-Path $root 'fx9600-writing-box.jar'))

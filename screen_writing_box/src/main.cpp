@@ -3,7 +3,11 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <TFT_eSPI.h>
-#include "config.h"
+#if defined(FX9600_BUILD_CHECK)
+#include "../include/config.example.h"
+#else
+#include "../include/config.h"
+#endif
 #include "be_vietnam_pro_20.h"
 #include "be_vietnam_pro_32.h"
 #include "health_ui.h"

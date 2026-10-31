@@ -33,3 +33,11 @@ host checks không thay build/chạy firmware, độ trễ TFT hoặc scheduling
 API là latest snapshot, có thể coalesce event; journal giữ outcome giao dịch.
 HTTP chưa auth/TLS, chỉ dùng LAN/ACL được provision. Font Be Vietnam Pro giữ nguyên;
 tool tạo font: `tools/GenerateVietnameseFont.java`. Chưa có SAT reader/ESP32 thật.
+
+Phase 4 có môi trường `esp32-s3-build-check` kế thừa đúng board/thư viện/GPIO,
+chỉ build với `config.example.h`; không đọc/ghi config thật. Dùng
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-screen.ps1`
+từ repository sau khi chuẩn bị Python/PlatformIO local. Không upload artifact này.
+Build dùng target/p4 (core), target/l4 (libraries), target/f4 (output) để tránh
+Windows command-line quá dài. Cách cài và kết quả thực trong
+[firmware build report](../document/phase4/firmware-build-report.md).

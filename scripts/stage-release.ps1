@@ -1,4 +1,4 @@
-param([string]$OutputDirectory = 'target/release-staging', [string]$Version = '3.0.0-local',
+param([string]$OutputDirectory = 'target/release-staging', [string]$Version = '4.0.0-local',
     [string]$TarCommand = 'tar', [string]$ShellCommand = 'sh')
 $ErrorActionPreference = 'Stop'
 Push-Location (Split-Path -Parent $PSScriptRoot)
@@ -25,9 +25,10 @@ try {
     Add-Type -AssemblyName System.IO.Compression
     $zip = [IO.Compression.ZipFile]::Open((Join-Path $payload 'fx9600-writing-box.jar'), [IO.Compression.ZipArchiveMode]::Create)
     try {
-        foreach ($file in (Get-ChildItem -LiteralPath $classes -Recurse -File)) {
+        foreach ($file in (Get-ChildItem -LiteralPath $classes -Recurse -File | Sort-Object FullName)) {
             $entryName = $file.FullName.Substring($classes.Length + 1) -replace '\\','/'
             $entry = $zip.CreateEntry($entryName)
+            $entry.LastWriteTime = [DateTimeOffset]::new(2000, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
             $inputStream = $file.OpenRead(); $outputStream = $entry.Open()
             try { $inputStream.CopyTo($outputStream) } finally { $inputStream.Dispose(); $outputStream.Dispose() }
         }
@@ -42,7 +43,20 @@ try {
     }
     $baseline = (& git rev-parse HEAD | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { throw 'Cannot identify source baseline' }
-    $metadata = "version=$Version`nsource.baseline=$baseline`nsource.state=uncommitted-phase3`nstatus.schema=2`njournal.schema=FXJNL01`nruntime.schema=FXRUNTIME02`nrollback.requires=FXJNL01+FXRUNTIME02`nproduction.write=BLOCKED`nfirmware.sat=BLOCKED`npackage.type=local-tar-not-zebra-installer`n"
+    # Record exact checkout bytes, including uncommitted code, tests and build scripts.
+    # This manifest stays beside build output; its digest is inside the checksummed payload.
+    $inputs = @(Get-ChildItem src,deploy,scripts -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/]__pycache__[\\/]' })
+    $inputs += Get-Item library/Symbol.RFID.API3.jar,station.properties.example
+    $inputLines = @($inputs | Sort-Object FullName | ForEach-Object {
+        (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' +
+            ($_.FullName.Substring($workspace.Length) -replace '\\','/')
+    })
+    $inputManifest = ($inputLines -join "`n") + "`n"
+    [IO.File]::WriteAllText((Join-Path $destination 'source-inputs.sha256'), $inputManifest, $utf8)
+    $inputHash = (Get-FileHash -LiteralPath (Join-Path $destination 'source-inputs.sha256') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $compiler = (& javac -version 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot identify compiler' }
+    $metadata = "version=$Version`nsource.baseline=$baseline`nsource.state=uncommitted-phase4`nsource.inputs.sha256=$inputHash`nbuild.javac=$compiler`nbuild.epoch=946684800`nstatus.schema=2`njournal.schema=FXJNL01`nruntime.schema=FXRUNTIME02`nrollback.requires=FXJNL01+FXRUNTIME02`nproduction.write=BLOCKED`nfirmware.sat=BLOCKED`npackage.type=local-tar-not-zebra-installer`n"
     [IO.File]::WriteAllText((Join-Path $payload 'release.properties'), $metadata, $utf8)
     $hashes = @(Get-ChildItem -LiteralPath $payload -File | Sort-Object Name | ForEach-Object {
         (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant() + '  ' + $_.Name
@@ -56,9 +70,9 @@ try {
     $tarPayload = $payload -replace '\\','/'
     if ($env:OS -eq 'Windows_NT' -and $tarArchive -match '^([A-Za-z]):/(.*)$') { $tarArchive = '/' + $Matches[1].ToLowerInvariant() + '/' + $Matches[2] }
     if ($env:OS -eq 'Windows_NT' -and $tarPayload -match '^([A-Za-z]):/(.*)$') { $tarPayload = '/' + $Matches[1].ToLowerInvariant() + '/' + $Matches[2] }
-    & $TarCommand --format=ustar --mode=0644 --owner=0 --group=0 -cf "$tarArchive.work" -C $tarPayload @('fx9600-writing-box.jar','Symbol.RFID.API3.jar','station.properties.example','release.properties','SHA256SUMS')
+    & $TarCommand --format=ustar --mtime=@946684800 --mode=0644 --owner=0 --group=0 --numeric-owner -cf "$tarArchive.work" -C $tarPayload @('fx9600-writing-box.jar','Symbol.RFID.API3.jar','station.properties.example','release.properties','SHA256SUMS')
     if ($LASTEXITCODE -ne 0) { throw 'Data archive failed' }
-    & $TarCommand --format=ustar --mode=0755 --owner=0 --group=0 -rf "$tarArchive.work" -C $tarPayload @scripts
+    & $TarCommand --format=ustar --mtime=@946684800 --mode=0755 --owner=0 --group=0 --numeric-owner -rf "$tarArchive.work" -C $tarPayload @scripts
     if ($LASTEXITCODE -ne 0) { throw 'Executable archive failed' }
     Move-Item -LiteralPath "$archive.work" -Destination $archive
     $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
