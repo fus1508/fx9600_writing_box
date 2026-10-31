@@ -3,6 +3,7 @@ package org.fus;
 import org.fus.api.StatusServer;
 import org.fus.config.StationConfig;
 import org.fus.domain.StationWorkflow;
+import org.fus.domain.TransactionJournal;
 import org.fus.device.scanner.ScannerSource;
 import org.fus.device.rfid.RfidGateway;
 import org.fus.device.rfid.OperationGuard;
@@ -20,20 +21,28 @@ import java.nio.file.Paths;
 /** One physical tag must be isolated in the enclosure. */
 public final class Main {
     public static void main(String[] args) throws Exception {
-        if (args.length != 1) { System.err.println("Usage: org.fus.Main <station.properties>"); System.exit(2); }
-        final StationConfig config = new StationConfig(args[0]);
+        boolean acknowledgement = args.length == 6 && "--ack-recovery".equals(args[0]);
+        if (args.length != 1 && !acknowledgement) {
+            System.err.println("Usage: org.fus.Main <station.properties> | --ack-recovery <config> <txId> QUARANTINED_BOX_EMPTY <operator/evidence-ref> OFFLINE");
+            System.exit(2); return;
+        }
+        final StationConfig config = new StationConfig(args[acknowledgement ? 1 : 0]);
+        final TransactionJournal journal = new TransactionJournal(Paths.get(config.journalPath), Paths.get(config.recoveryMarker));
+        if (acknowledgement) {
+            try {
+                if (!"OFFLINE".equals(args[5])) throw new IllegalArgumentException("OFFLINE_RECONCILIATION_REQUIRED");
+                journal.acknowledgeQuarantine(args[2], args[3], args[4]);
+                System.out.println("RECOVERY_ACKNOWLEDGED; historical outcome retained; no RFID operation performed");
+            } finally { journal.close(); }
+            return;
+        }
         final AtomicBoolean scannerReady = new AtomicBoolean();
         final AtomicBoolean readerReady = new AtomicBoolean();
         final Object connectionLock = new Object();
         final AtomicReference<RfidGateway> gateway = new AtomicReference<RfidGateway>();
         final AtomicBoolean running = new AtomicBoolean(true);
         final StatusServer status = new StatusServer(config.statusHost, config.statusPort);
-        final OperationGuard guard = new OperationGuard(Paths.get(config.recoveryMarker));
-        if (guard.hasUnfinishedOperation()) {
-            status.setRecoveryWarning();
-            System.err.println("PREVIOUS_OPERATION_INCOMPLETE tagMayHaveChanged=true");
-        }
-        status.start();
+        final OperationGuard guard = new OperationGuard();
         StationWorkflow.Gateway delegated = new StationWorkflow.Gateway() {
             private RfidGateway current() { RfidGateway g = gateway.get(); if (g == null) throw new IllegalStateException("READER_DISCONNECTED"); return g; }
             public StationWorkflow.Target selectUnique() throws Exception { return current().selectUnique(); }
@@ -42,7 +51,8 @@ public final class Main {
         };
         final StationWorkflow station = new StationWorkflow(delegated,
                 status,
-                System::nanoTime, TimeUnit.SECONDS.toNanos(config.validitySeconds));
+                System::nanoTime, TimeUnit.SECONDS.toNanos(config.validitySeconds), journal);
+        status.start();
         final ScannerSource scanner = new ScannerSource(config.device, config.reconnectMs, new ScannerSource.Listener() {
             public void state(boolean ready) { synchronized (connectionLock) { scannerReady.set(ready); station.connections(ready, readerReady.get()); } }
             public void scan(String value) { station.scan(value); }
@@ -57,7 +67,10 @@ public final class Main {
             }
         }, "scanner-monitor");
         scannerMonitor.setDaemon(true); scannerMonitor.start();
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> { running.set(false); scanner.close(); worker.shutdownNow(); guard.close(); status.close(); }, "station-shutdown"));
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            running.set(false); station.shutdown(); worker.shutdownNow(); guard.close(); status.close(); scanner.close();
+            // The process retains the journal lock until exit, including a blocked native worker.
+        }, "station-shutdown"));
         System.out.println("CONNECTION scanner=DISCONNECTED reader=DISCONNECTED");
         Future<?> operation = null;
         while (running.get()) {
@@ -68,7 +81,10 @@ public final class Main {
                 gateway.set(new RfidGateway(reader, config.password));
                 synchronized (connectionLock) { readerReady.set(true); station.connections(scannerReady.get(), true); }
                 GpiButton button = new GpiButton(TimeUnit.MILLISECONDS.toNanos(config.debounceMs));
-                while (running.get() && gateway.get().isSessionUsable()) {
+                while (running.get()) {
+                    // No GPI SDK calls overlap an inventory/access operation on the same session.
+                    if (operation != null && !operation.isDone()) { Thread.sleep(25); continue; }
+                    if (!gateway.get().isSessionUsable()) break;
                     station.tick();
                     GPI_PORT_STATE value = reader.Config.GPI.getPortState(1);
                     if (value != GPI_PORT_STATE.GPI_PORT_STATE_HIGH && value != GPI_PORT_STATE.GPI_PORT_STATE_LOW) throw new IllegalStateException("GPI_STATE_UNKNOWN");
@@ -76,24 +92,19 @@ public final class Main {
                         Runnable work = station.beginTrigger();
                         if (work != null) {
                             try {
-                                guard.start(config.operationTimeoutMs, () -> {
-                                    status.status("FAIL", null, null, "category=TECHNICAL code=RFID_TIMEOUT stage=WORKFLOW tagMayHaveChanged=true");
-                                    System.err.println("RFID_TIMEOUT: process restart required; tag may have changed");
-                                    Runtime.getRuntime().halt(2);
-                                });
+                                guard.startFatal(config.operationTimeoutMs);
                                 operation = worker.submit(() -> {
                                     try {
                                         work.run();
                                         try { guard.completed(); }
-                                        catch (Exception e) { System.err.println("RECOVERY_MARKER_CLEANUP_FAILED"); }
+                                        catch (Exception e) { Runtime.getRuntime().halt(2); }
                                     } catch (Throwable failure) {
-                                        System.err.println("RFID_WORKER_CRASH: tag may have changed; process restart required");
                                         Runtime.getRuntime().halt(2);
                                     }
                                 });
                             } catch (Exception e) {
-                                try { guard.completed(); } catch (Exception ignored) { }
-                                station.abortReserved("RECOVERY_MARKER_FAILED");
+                                // Keep any durable evidence; never clear a failed operation here.
+                                station.abortReserved("OPERATION_SUBMISSION_FAILED");
                             }
                         }
                     }

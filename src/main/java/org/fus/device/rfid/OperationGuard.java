@@ -1,9 +1,11 @@
 package org.fus.device.rfid;
 
-import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Timer;
 import java.util.TimerTask;
 
@@ -14,14 +16,22 @@ public final class OperationGuard implements AutoCloseable {
     private boolean active;
     private long generation;
 
+    /** Phase 1 uses the transaction journal as durable evidence; this guard only owns the deadline. */
+    public OperationGuard() { this.marker = null; }
     public OperationGuard(Path marker) { this.marker = marker; }
-    public boolean hasUnfinishedOperation() { return Files.exists(marker); }
+    public boolean hasUnfinishedOperation() { return marker != null && !Files.notExists(marker); }
+
+    /** Fatal deadline shared by production and the blocked-status/log regression test. */
+    public void startFatal(long timeoutMs) throws IOException {
+        start(timeoutMs, () -> Runtime.getRuntime().halt(2));
+    }
 
     public synchronized void start(long timeoutMs, Runnable onTimeout) throws IOException {
         if (active || timeoutMs <= 0) throw new IllegalStateException("Invalid watchdog state");
-        try (FileOutputStream file = new FileOutputStream(marker.toFile())) {
-            file.write("RFID_OPERATION_IN_PROGRESS\n".getBytes("US-ASCII"));
-            file.getFD().sync();
+        if (marker != null) try (FileChannel file = FileChannel.open(marker, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+            ByteBuffer bytes = ByteBuffer.wrap("RFID_OPERATION_IN_PROGRESS\n".getBytes("US-ASCII"));
+            while (bytes.hasRemaining()) file.write(bytes);
+            file.force(true);
         }
         active = true;
         final long current = ++generation;
@@ -30,15 +40,15 @@ public final class OperationGuard implements AutoCloseable {
                 synchronized (OperationGuard.this) {
                     if (!active || generation != current) return;
                     active = false;
-                    onTimeout.run();
                 }
+                onTimeout.run();
             }
         }, timeoutMs);
     }
     public synchronized void completed() throws IOException {
         if (!active) return;
+        if (marker != null) Files.delete(marker);
         active = false;
-        Files.deleteIfExists(marker);
     }
     @Override public void close() { timer.cancel(); }
 }

@@ -24,6 +24,9 @@ public final class StatusServer implements StationWorkflow.Listener, AutoCloseab
     private String scanner = "DISCONNECTED", reader = "DISCONNECTED";
     private String state = "IDLE", barcode = "", epc = "", error = "";
     private boolean recoveryWarning;
+    private boolean safeToTrigger;
+    private long safeDeadline;
+    private String transactionId = "", safetyReason = "";
 
     public StatusServer(String host, int port) throws IOException {
         server = HttpServer.create(new InetSocketAddress(host, port), 8);
@@ -35,9 +38,18 @@ public final class StatusServer implements StationWorkflow.Listener, AutoCloseab
     public int port() { return server.getAddress().getPort(); }
     public synchronized void setRecoveryWarning() { recoveryWarning = true; changed(); }
 
+    @Override public synchronized void safety(boolean recovery, boolean safe, String id, String reason) {
+        safety(recovery, safe, id, reason, TimeUnit.MILLISECONDS.toNanos(250));
+    }
+    @Override public synchronized void safety(boolean recovery, boolean safe, String id, String reason, long validForNanos) {
+        safeDeadline = System.nanoTime() + Math.min(Math.max(0, validForNanos), TimeUnit.MILLISECONDS.toNanos(250));
+        if (recoveryWarning == recovery && safeToTrigger == safe && transactionId.equals(id) && safetyReason.equals(reason)) return;
+        recoveryWarning = recovery; safeToTrigger = safe; transactionId = limit(id, 64); safetyReason = limit(reason, 160);
+        changed();
+    }
+
     @Override
     public synchronized void status(String next, String scanned, String encoded, String detail) {
-        System.out.println(next + " barcode=" + scanned + " epc=" + encoded + " " + detail);
         if ("CONNECTION".equals(next)) {
             scanner = detail.contains("scanner=READY") ? "READY" : "DISCONNECTED";
             reader = detail.contains("reader=READY") ? "READY" : "DISCONNECTED";
@@ -45,7 +57,6 @@ public final class StatusServer implements StationWorkflow.Listener, AutoCloseab
                 state = "IDLE"; barcode = ""; epc = ""; error = "";
             }
         } else {
-            if ("WAIT_TRIGGER".equals(next)) recoveryWarning = false;
             state = next;
             barcode = limit(scanned, 64);
             epc = limit(encoded, 124);
@@ -63,8 +74,11 @@ public final class StatusServer implements StationWorkflow.Listener, AutoCloseab
     private synchronized byte[] snapshot() {
         String json = "{\"revision\":" + quote(revisionId()) + ",\"state\":" + quote(state) + ",\"scanner\":" + quote(scanner)
                 + ",\"reader\":" + quote(reader) + ",\"barcode\":" + quote(barcode)
-                + ",\"epc\":" + quote(epc) + ",\"error\":" + quote(error.isEmpty() && recoveryWarning
-                ? "PREVIOUS_OPERATION_INCOMPLETE tagMayHaveChanged=true" : error) + "}";
+                + ",\"epc\":" + quote(epc) + ",\"error\":" + quote(recoveryWarning
+                ? "PREVIOUS_OPERATION_INCOMPLETE tagMayHaveChanged=true" : error)
+                + ",\"recoveryRequired\":" + recoveryWarning
+                + ",\"safeToTrigger\":" + (safeToTrigger && safeDeadline - System.nanoTime() > 0 && !recoveryWarning && "WAIT_TRIGGER".equals(state) && "READY".equals(reader) && "READY".equals(scanner))
+                + ",\"transactionId\":" + quote(transactionId) + ",\"safetyReason\":" + quote(safetyReason) + "}";
         return json.getBytes(StandardCharsets.UTF_8);
     }
     private static String quote(String value) {

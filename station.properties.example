@@ -9,3 +9,5 @@ status.bind=0.0.0.0
 status.port=8081
 operation.timeout.ms=30000
 recovery.marker=rfid-operation.marker
+# Persistent protected state. Preserve across upgrades/restarts; never place under /tmp.
+transaction.journal=rfid-transactions.journal

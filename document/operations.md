@@ -1,5 +1,11 @@
 ﻿# Vận hành trạm FX9600
 
+> **Pha 1 (2026-10-31): đường ghi thật đang BLOCKED**, không thực hiện quy trình
+> ghi của bản cũ bên dưới. Recovery chỉ được ACK offline sau khi dừng ứng dụng,
+> xác nhận RF/session cũ đã dừng, cách ly tag và có tham chiếu đối soát. Xem
+> [quy trình Pha 1](phase1/architecture.md) và
+> [điều kiện phần cứng](phase1/hardware-blockers.md). Không xóa journal/marker để mở khóa.
+
 Để chuẩn bị bản chạy thử, sao chép lên reader và xử lý sự cố hoặc phục hồi, làm theo [deployment-and-recovery.md](deployment-and-recovery.md). Cấu hình mẫu nằm tại [station.properties.example](../station.properties.example); mật khẩu truy cập tag được cung cấp qua biến môi trường `FX9600_ACCESS_PASSWORD`, mặc định bằng 0.
 
 1. Xác nhận scanner CDC ở chế độ raw, hậu tố LF, reader và scanner sẵn sàng, và chỉ có một tag vật lý trong box.

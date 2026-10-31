@@ -1,5 +1,13 @@
 # Triển khai và phục hồi trạm FX9600
 
+> **Pha 1 (2026-10-31): chưa được deploy.** Đường ghi RFID production bị khóa
+> `HARDWARE_VERIFICATION_REQUIRED`; không áp dụng các bước thử ghi và phục hồi cũ
+> bên dưới cho bản này. Scan/timeout/reboot không xóa recovery. Journal, checkpoint
+> và marker phải được giữ qua upgrade. Quy trình hiện hành và ACK offline nằm tại
+> [phase1/architecture.md](phase1/architecture.md); xem
+> [phase1/hardware-blockers.md](phase1/hardware-blockers.md) trước mọi SAT/deploy.
+> Các mục còn lại mô tả bản trước Pha 1 và được giữ để tham chiếu.
+
 ## Trạng thái
 
 Đây là bộ file để thử nghiệm, chưa phải gói `.deb` và chưa được xác minh để tự chạy trên firmware 3.32.37. Cần kiểm tra SDK Embedded, cách cài và cơ chế giám sát tiến trình thực tế trước khi đóng gói hoặc vận hành. Chưa kiểm thử watchdog bằng SDK/tag thật.

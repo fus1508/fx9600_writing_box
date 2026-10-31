@@ -37,7 +37,8 @@ public final class StatusServerCheck {
             server.status("WAIT_TRIGGER", "9K1135600660004039", "394B1135600660004039", "");
             String json = get(server.port());
             if (!json.contains("\"scanner\":\"READY\"") || !json.contains("\"reader\":\"READY\"") || !json.contains("\"state\":\"WAIT_TRIGGER\"")) throw new AssertionError(json);
-            if (json.contains("PREVIOUS_OPERATION_INCOMPLETE")) throw new AssertionError(json);
+            if (!json.contains("PREVIOUS_OPERATION_INCOMPLETE")) throw new AssertionError("scan cleared recovery: " + json);
+            if (!json.contains("\"recoveryRequired\":true") || !json.contains("\"safeToTrigger\":false")) throw new AssertionError(json);
             Matcher revision = Pattern.compile("\\\"revision\\\":\\\"([^\\\"]+)\\\"").matcher(json);
             if (!revision.find()) throw new AssertionError(json);
             ExecutorService pool = Executors.newSingleThreadExecutor();
@@ -58,8 +59,27 @@ public final class StatusServerCheck {
             server.status("CONNECTION", null, null, "scanner=DISCONNECTED reader=READY");
             json = get(server.port());
             if (!json.contains("\"scanner\":\"DISCONNECTED\"") || json.contains("9K1135600660004039")) throw new AssertionError(json);
+            if (!json.contains("\"recoveryRequired\":true")) throw new AssertionError("disconnect cleared recovery");
+            server.safety(false, false, "test-transaction", "ACKNOWLEDGED");
             server.status("FAIL", null, null, "quote=\" newline=\n");
             if (!get(server.port()).contains("quote=\\\" newline=\\u000a")) throw new AssertionError();
+            server.status("CONNECTION", null, null, "scanner=READY reader=READY");
+            server.status("WAIT_TRIGGER", "9K1135600660004039", null, "");
+            server.safety(false, true, "lease-test", "", TimeUnit.SECONDS.toNanos(5));
+            if (!get(server.port()).contains("\"safeToTrigger\":true")) throw new AssertionError("live lease missing");
+            Thread.sleep(300);
+            if (!get(server.port()).contains("\"safeToTrigger\":false")) throw new AssertionError("stale safety lease survived stalled workflow");
+            server.safety(false, true, "expired-barcode", "", 0);
+            if (!get(server.port()).contains("\"safeToTrigger\":false")) throw new AssertionError("expired barcode safe");
+        }
+        try (SafetyFixture fixture = new SafetyFixture(); StatusServer server = new StatusServer("127.0.0.1", 0)) {
+            org.fus.domain.StationWorkflow workflow = new org.fus.domain.StationWorkflow(fixture.rfid, server,
+                    System::nanoTime, TimeUnit.SECONDS.toNanos(2), fixture.journal);
+            workflow.connections(true, true); server.start(); workflow.scan(SafetyFixture.BARCODE);
+            Thread.sleep(150); workflow.tick(); Thread.sleep(150); workflow.tick();
+            if (!get(server.port()).contains("\"safeToTrigger\":true")) throw new AssertionError("healthy progress did not renew lease");
+            Thread.sleep(300);
+            if (!get(server.port()).contains("\"safeToTrigger\":false")) throw new AssertionError("stalled workflow renewed lease");
         }
         System.out.println("Status server checks passed");
     }

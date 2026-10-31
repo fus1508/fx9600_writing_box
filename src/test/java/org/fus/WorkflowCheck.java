@@ -1,52 +1,37 @@
 package org.fus;
 
-import org.fus.domain.StationWorkflow;
 import org.fus.domain.EpcCodec;
 import org.fus.device.gpi.GpiButton;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicLong;
+import static org.fus.SafetyFixture.*;
 
-public class WorkflowCheck {
-    private static void check(boolean value) { if (!value) throw new AssertionError(); }
-    private static class Rfid implements StationWorkflow.Gateway {
-        int writes; boolean unique = true; boolean mismatch;
-        String epc;
-        public StationWorkflow.Target selectUnique() { if (!unique) throw new IllegalStateException("MULTIPLE_TAGS"); return new StationWorkflow.Target() {}; }
-        public void write(StationWorkflow.Target target, String value) { writes++; epc = value; }
-        public String read(StationWorkflow.Target target) { return mismatch ? "394B1135600660004038" : epc; }
-    }
-    public static void main(String[] args) {
-        String barcode = "9K1135600660004039";
-        check(EpcCodec.encode(barcode).equals("394B1135600660004039"));
-        check(EpcCodec.decode("394b1135600660004039").equals(barcode));
+public final class WorkflowCheck {
+    public static void main(String[] args) throws Exception {
+        check(EpcCodec.encode(BARCODE).equals(EPC), "encode");
+        check(EpcCodec.decode(EPC.toLowerCase(java.util.Locale.ROOT)).equals(BARCODE), "decode");
+        check(EpcCodec.decode("30300000000000000001").equals("000000000000000001"), "leading zero");
         try { EpcCodec.decode("394B113560066000403A"); throw new AssertionError(); } catch (IllegalArgumentException expected) { }
-        AtomicLong now = new AtomicLong();
-        List<String> states = new ArrayList<String>();
-        Rfid rfid = new Rfid();
-        StationWorkflow s = new StationWorkflow(rfid, (state, b, e, d) -> states.add(state), now::get, 100);
-        s.connections(true, true);
-        s.scan(barcode); s.trigger(); check(rfid.writes == 1 && states.get(states.size()-1).equals("PASS"));
-        s.trigger(); check(rfid.writes == 1);
-        s.scan(barcode); now.set(100); s.trigger(); check(rfid.writes == 1);
-        s.scan("invalid"); s.trigger(); check(rfid.writes == 1);
-        s.scan(barcode); rfid.unique = false; s.trigger(); check(rfid.writes == 1 && states.get(states.size()-1).equals("FAIL"));
-        rfid.unique = true; rfid.mismatch = true; s.scan(barcode); s.trigger(); check(rfid.writes == 2 && states.get(states.size()-1).equals("FAIL"));
-        rfid.mismatch = false;
-        s.scan(barcode); s.connections(false, true); s.connections(true, true); s.trigger(); check(rfid.writes == 2);
-        s.scan(barcode); s.trigger(); check(rfid.writes == 3 && states.get(states.size()-1).equals("PASS"));
-        now.addAndGet(java.util.concurrent.TimeUnit.SECONDS.toNanos(5)); s.tick(); check(states.get(states.size()-1).equals("IDLE"));
-        String next = "9F1135600660004039";
-        s.scan(barcode); s.scan(next); s.trigger(); check(rfid.epc.equals(EpcCodec.encode(next)));
-        s.scan(barcode); Runnable captured = s.beginTrigger(); check(captured != null);
-        check(!s.scan(next)); captured.run(); check(rfid.epc.equals(EpcCodec.encode(barcode)));
-        s.scan(barcode); Runnable disconnected = s.beginTrigger();
-        int before = rfid.writes; s.connections(false, true); disconnected.run();
-        check(rfid.writes == before && states.get(states.size()-1).equals("FAIL"));
+        try (SafetyFixture f = new SafetyFixture()) {
+            f.write(); check(f.rfid.writes == 1 && f.state().equals("PASS"), "verified write");
+            f.station.trigger(); check(f.rfid.writes == 1, "consumed barcode");
+            f.station.scan(BARCODE); f.now.set(100); f.station.trigger(); check(f.rfid.writes == 1, "expiry");
+            f.station.scan("invalid"); f.station.trigger(); check(f.rfid.writes == 1, "invalid barcode");
+            f.rfid.unique = false; f.write(); check(f.rfid.writes == 1 && f.state().equals("FAIL"), "multiple tags");
+            f.rfid.unique = true;
+            f.station.scan(BARCODE); f.station.connections(false, true); f.station.connections(true, true); f.station.trigger();
+            check(f.rfid.writes == 1, "disconnect consumes barcode");
+            f.write(); check(f.rfid.writes == 2 && f.state().equals("PASS"), "recovered safe failure");
+            f.now.addAndGet(java.util.concurrent.TimeUnit.SECONDS.toNanos(5)); f.station.tick(); check(f.state().equals("IDLE"), "result timeout");
+            String next = "9F1135600660004039";
+            f.station.scan(BARCODE); f.station.scan(next); f.station.trigger(); check(f.rfid.epc.equals(EpcCodec.encode(next)), "latest barcode");
+            f.station.scan(BARCODE); Runnable captured = f.station.beginTrigger(); check(captured != null, "reserve");
+            check(!f.station.scan(next), "scan during write"); captured.run(); check(f.rfid.epc.equals(EPC), "reserved barcode");
+            f.station.scan(BARCODE); Runnable disconnected = f.station.beginTrigger(); int before = f.rfid.writes;
+            f.station.connections(false, true); disconnected.run(); check(f.rfid.writes == before && f.state().equals("FAIL"), "disconnect before worker");
+        }
         GpiButton button = new GpiButton(10);
-        check(!button.update(false, 0)); check(!button.update(false, 20));
-        check(!button.update(true, 21)); check(!button.update(true, 31));
-        check(!button.update(false, 32)); check(button.update(false, 42)); check(!button.update(false, 60));
+        check(!button.update(false, 0) && !button.update(false, 20), "boot low");
+        check(!button.update(true, 21) && !button.update(true, 31), "release");
+        check(!button.update(false, 32) && button.update(false, 42) && !button.update(false, 60), "debounce");
         System.out.println("Workflow checks passed");
     }
 }
